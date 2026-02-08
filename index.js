@@ -1,38 +1,56 @@
-const express = require("express");
-const bodyParser = require("body-parser");
+import express from "express";
+import bodyParser from "body-parser";
+import OpenAI from "openai";
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
-// Middleware to read incoming form data (Twilio sends form-encoded data)
 app.use(bodyParser.urlencoded({ extended: false }));
 
-// Health check (for browser / Railway)
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
 app.get("/", (req, res) => {
   res.send("WhatsApp AI server is running ✅");
 });
 
-// Twilio webhook endpoint
 app.post("/whatsapp", async (req, res) => {
   const incomingMsg = req.body.Body;
-  const from = req.body.From;
 
-  console.log("Message from:", from);
-  console.log("Message text:", incomingMsg);
+  try {
+    const response = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: [
+        {
+          role: "system",
+          content: "You are a helpful, polite WhatsApp assistant.",
+        },
+        {
+          role: "user",
+          content: incomingMsg,
+        },
+      ],
+      max_tokens: 150,
+    });
 
-  // Simple reply for now
-  const reply = `You said: "${incomingMsg}"`;
+    const aiReply = response.choices[0].message.content;
 
-  // Twilio expects XML (TwiML)
-  res.set("Content-Type", "text/xml");
-  res.send(`
-    <Response>
-      <Message>${reply}</Message>
-    </Response>
-  `);
+    res.set("Content-Type", "text/xml");
+    res.send(`
+      <Response>
+        <Message>${aiReply}</Message>
+      </Response>
+    `);
+  } catch (error) {
+    console.error(error);
+    res.send(`
+      <Response>
+        <Message>Sorry, something went wrong.</Message>
+      </Response>
+    `);
+  }
 });
 
-// Start server
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log("Server running on port", PORT);
 });
