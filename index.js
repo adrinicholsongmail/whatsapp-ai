@@ -14,6 +14,7 @@ app.get("/", (req, res) => {
 });
 
 app.post("/whatsapp", async (req, res) => {
+  console.log("OPENAI KEY EXISTS:", !!process.env.OPENAI_API_KEY);
   const incomingMsg = req.body.Body;
 
   try {
