@@ -17,34 +17,40 @@ app.post('/whatsapp', async (req, res) => {
   try {
     console.log("📩 Webhook hit");
 
-    const incomingMsg =
-      req.body.Body ||
-      req.body.message ||
-      "";
-
+    const incomingMsg = req.body.Body || "";
     console.log("📨 Incoming message:", incomingMsg);
 
-    console.log(
-      "🔑 OpenAI key exists:",
-      !!process.env.OPENAI_API_KEY
-    );
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a friendly Saudi-based massage booking assistant. Respond naturally in Saudi Arabic dialect."
+        },
+        {
+          role: "user",
+          content: incomingMsg
+        }
+      ]
+    });
 
-    if (!process.env.OPENAI_API_KEY) {
-      throw new Error("Missing OpenAI API Key");
-    }
+    const reply = completion.choices[0].message.content;
 
-    // TEMP RESPONSE (no OpenAI yet)
+    console.log("🤖 AI reply:", reply);
+
     res.send(
-      `<Response><Message>Message received: ${incomingMsg}</Message></Response>`
+      `<Response><Message>${reply}</Message></Response>`
     );
 
   } catch (err) {
-    console.error("❌ ERROR:", err.message);
+    console.error("❌ OpenAI ERROR:", err);
     res.send(
       `<Response><Message>Sorry, something went wrong.</Message></Response>`
     );
   }
 });
+
 
 
 const PORT = process.env.PORT || 3000;
