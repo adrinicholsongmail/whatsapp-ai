@@ -13,43 +13,39 @@ app.get("/", (req, res) => {
   res.send("WhatsApp AI server is running ✅");
 });
 
-app.post("/whatsapp", async (req, res) => {
-  console.log("OPENAI KEY EXISTS:", !!process.env.OPENAI_API_KEY);
-  const incomingMsg = req.body.Body;
-
+app.post('/whatsapp', async (req, res) => {
   try {
-    const response = await openai.chat.completions.create({
-      model: "gpt-4.1-mini",
-      messages: [
-        {
-          role: "system",
-          content: "You are a helpful, polite WhatsApp assistant.",
-        },
-        {
-          role: "user",
-          content: incomingMsg,
-        },
-      ],
-      max_tokens: 150,
-    });
+    console.log("📩 Webhook hit");
 
-    const aiReply = response.choices[0].message.content;
+    const incomingMsg =
+      req.body.Body ||
+      req.body.message ||
+      "";
 
-    res.set("Content-Type", "text/xml");
-    res.send(`
-      <Response>
-        <Message>${aiReply}</Message>
-      </Response>
-    `);
-  } catch (error) {
-    console.error(error);
-    res.send(`
-      <Response>
-        <Message>Sorry, something went wrong.</Message>
-      </Response>
-    `);
+    console.log("📨 Incoming message:", incomingMsg);
+
+    console.log(
+      "🔑 OpenAI key exists:",
+      !!process.env.OPENAI_API_KEY
+    );
+
+    if (!process.env.OPENAI_API_KEY) {
+      throw new Error("Missing OpenAI API Key");
+    }
+
+    // TEMP RESPONSE (no OpenAI yet)
+    res.send(
+      `<Response><Message>Message received: ${incomingMsg}</Message></Response>`
+    );
+
+  } catch (err) {
+    console.error("❌ ERROR:", err.message);
+    res.send(
+      `<Response><Message>Sorry, something went wrong.</Message></Response>`
+    );
   }
 });
+
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
