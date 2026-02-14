@@ -105,7 +105,7 @@ IMPORTANT:
 You are confident, not desperate.
 You close professionally.
 `
-},
+}
         {
           role: "user",
           content: incomingMsg
