@@ -14,28 +14,6 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-app.get("/test-db", async (req, res) => {
-  const { data, error } = await supabase.from("bookings").insert([
-    {
-      customer_name: "Test User",
-      phone: "123456",
-      area: "Test Area",
-      address: "Test Address",
-      duration: "60",
-      therapist: "Test Therapist",
-      price: 300,
-      status: "confirmed"
-    }
-  ]);
-
-  if (error) {
-    console.error(error);
-    return res.send("DB Error");
-  }
-
-  res.send("Inserted Successfully");
-});
-
 
 // ===== STORED RESPONSES =====
 const storedResponses = {
