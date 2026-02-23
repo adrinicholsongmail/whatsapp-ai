@@ -1,173 +1,133 @@
 import express from "express";
 import bodyParser from "body-parser";
 import OpenAI from "openai";
+import { createClient } from "@supabase/supabase-js";
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
+app.use(bodyParser.json());
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Simple in-memory session storage
-const sessions = {};
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
-app.get("/", (req, res) => {
-  res.send("WhatsApp AI server is running ✅");
-});
+// ===== STORED RESPONSES =====
+const storedResponses = {
+  price: "Our prices are:\n60 min – 300\n90 min – 450\n120 min – 600",
+  location: "We provide home service massage. Please share your location.",
+  hours: "You can book between 12:00 PM and 10:30 PM. Last booking is 10:30 PM.",
+  types: "We offer Relaxation, Deep Tissue, Swedish, and Thai massage."
+};
 
-// Detect Arabic
-function isArabic(text) {
-  return /[\u0600-\u06FF]/.test(text);
+// ===== LANGUAGE DETECTION =====
+function detectLanguage(text) {
+  const arabicRegex = /[\u0600-\u06FF]/;
+  return arabicRegex.test(text) ? "ar" : "en";
 }
 
-// Human typing delay
-function getTypingDelay(text) {
-  const words = text.split(" ").length;
-  if (words <= 3) return 800;
-  if (words <= 8) return 1500;
-  if (words <= 15) return 2500;
-  return 3500;
+// ===== CHECK STORED RESPONSES =====
+function checkStoredResponse(message) {
+  const msg = message.toLowerCase();
+
+  if (msg.includes("price")) return storedResponses.price;
+  if (msg.includes("where") || msg.includes("location")) return storedResponses.location;
+  if (msg.includes("time") || msg.includes("hours")) return storedResponses.hours;
+  if (msg.includes("types") || msg.includes("massage")) return storedResponses.types;
+
+  return null;
 }
 
-app.post("/whatsapp", async (req, res) => {
-  try {
-    const incomingMsg = req.body.Body || "";
-    const from = req.body.From;
+// ===== REPEAT CUSTOMER DETECTION =====
+async function isRepeatCustomer(phone) {
+  const { data } = await supabase
+    .from("bookings")
+    .select("id")
+    .eq("phone", phone)
+    .limit(1);
 
-    if (!sessions[from]) {
-      sessions[from] = { aiActive: true };
-    }
+  return data && data.length > 0;
+}
 
-    const lowerMsg = incomingMsg.toLowerCase();
+// ===== THERAPIST DAILY LIMIT =====
+async function therapistAvailable(name) {
+  const today = new Date().toISOString().split("T")[0];
 
-    console.log("📨 From:", from);
-    console.log("💬 Message:", incomingMsg);
+  const { data } = await supabase
+    .from("bookings")
+    .select("id")
+    .eq("therapist", name)
+    .gte("created_at", today);
 
-    // ===============================
-    // ADMIN COMMANDS (Hidden)
-    // ===============================
+  return data.length < 5; // max 5 bookings per day per therapist
+}
 
-    if (lowerMsg === "/takeover") {
-      sessions[from].aiActive = false;
-      console.log("⏸ AI paused for", from);
-      return res.send("<Response></Response>");
-    }
+// ===== LOG BOOKING =====
+async function logBooking(data) {
+  await supabase.from("bookings").insert([data]);
+}
 
-    if (lowerMsg === "/resume") {
-      sessions[from].aiActive = true;
-      console.log("▶ AI resumed for", from);
-      return res.send("<Response></Response>");
-    }
+// ===== WEBHOOK =====
+app.post("/webhook", async (req, res) => {
+  const incomingMsg = req.body.Body;
+  const phone = req.body.From;
 
-    // If AI paused → do nothing
-    if (!sessions[from].aiActive) {
-      console.log("⏸ AI currently paused.");
-      return res.send("<Response></Response>");
-    }
+  const language = detectLanguage(incomingMsg);
 
-    // ===============================
-    // HARD AREA RULES
-    // ===============================
-
-    if (lowerMsg.includes("qaidah")) {
-      return res.send(
-        `<Response><Message>Sorry, we don’t service Qaidah area.</Message></Response>`
-      );
-    }
-
-    if (lowerMsg.includes("jubail balad")) {
-      sessions[from].aiActive = false; // auto pause
-      return res.send(
-        `<Response><Message>Let me check availability and confirm shortly.</Message></Response>`
-      );
-    }
-
-    // Offer direct response (skip AI)
-    if (lowerMsg.includes("offer") || lowerMsg.includes("عرض")) {
-      return res.send(
-        `<Response><Message>
-60 min – 250 SAR
-90 min – 350 SAR
-120 min – 450 SAR
-</Message></Response>`
-      );
-    }
-
-    // ===============================
-    // OPENAI RESPONSE
-    // ===============================
-
-    const systemPrompt = `
-You are a real human Saudi home massage booking assistant.
-
-TONE:
-- Calm
-- Neutral
-- Natural
-- No exaggeration
-- No "ممتاز", "Excellent", "Perfect" unless truly appropriate
-- Do not react emotionally to normal info
-
-STYLE:
-- Short replies
-- 1-2 sentences max
-- If few words enough, use them
-- No robotic structure
-- No restarting conversation
-
-LANGUAGE:
-- Match customer language exactly
-
-SERVICE:
-- Home massage for men
-- 60 = 250 SAR
-- 90 = 350 SAR
-- 120 = 450 SAR
-
-AREAS:
-- Jubail Industrial → normal booking
-- Jubail Balad → say checking availability (no confirmation)
-- Qaidah → not serviced
-
-FLOW:
-- Booking intent → "Share your location please."
-- If no house/apartment number → ask for it
-- If provided → ask preferred time
-- Do not push booking when answering offer questions
-
-GOAL:
-Be efficient.
-Be human.
-Close booking naturally.
-`;
-
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: incomingMsg },
-      ],
-      temperature: 0.5,
-    });
-
-    const reply = completion.choices[0].message.content.trim();
-
-    const delay = getTypingDelay(reply);
-
-    setTimeout(() => {
-      res.send(`<Response><Message>${reply}</Message></Response>`);
-    }, delay);
-
-  } catch (err) {
-    console.error("❌ ERROR:", err);
-    res.send(
-      `<Response><Message>Sorry, something went wrong.</Message></Response>`
-    );
+  // 1️⃣ STORED RESPONSES FIRST
+  const stored = checkStoredResponse(incomingMsg);
+  if (stored) {
+    return res.send(`<Response><Message>${stored}</Message></Response>`);
   }
+
+  // 2️⃣ AI RESPONSE
+  const systemPrompt = `
+  Reply in ${language === "ar" ? "Arabic" : "English"} only.
+  Match customer's language.
+  Do not exaggerate.
+  Keep responses natural and balanced.
+  Always acknowledge requests briefly before asking next question.
+  `;
+
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: incomingMsg }
+    ]
+  });
+
+  const aiReply = completion.choices[0].message.content;
+
+  res.send(`<Response><Message>${aiReply}</Message></Response>`);
 });
+
+// ===== CONFIRM BOOKING EXAMPLE FUNCTION =====
+async function confirmBooking(details) {
+  const repeat = await isRepeatCustomer(details.phone);
+
+  const available = await therapistAvailable(details.therapist);
+  if (!available) {
+    return "Selected therapist is fully booked today. Please choose another time.";
+  }
+
+  await logBooking({
+    customer_name: details.name,
+    phone: details.phone,
+    area: details.area,
+    address: details.address,
+    duration: details.duration,
+    therapist: details.therapist,
+    price: details.price,
+    status: "confirmed"
+  });
+
+  return repeat
+    ? "Your booking is confirmed. Welcome back."
+    : "Your booking is confirmed. We look forward to serving you.";
+}
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
-});
+app.listen(PORT, () => console.log("Server running"));
