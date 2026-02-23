@@ -71,7 +71,7 @@ async function logBooking(data) {
 }
 
 // ===== WEBHOOK =====
-app.post("/webhook", async (req, res) => {
+app.post("/whatsapp/webhook", async (req, res) => {
   const incomingMsg = req.body.Body;
   const phone = req.body.From;
 
