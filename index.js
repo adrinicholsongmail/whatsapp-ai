@@ -62,7 +62,7 @@ async function therapistAvailable(name) {
     .eq("therapist", name)
     .gte("created_at", today);
 
-  return data.length < 5; // max 5 bookings per day per therapist
+  return data.length < 6; // max 6 bookings per day per therapist
 }
 
 // ===== LOG BOOKING =====
