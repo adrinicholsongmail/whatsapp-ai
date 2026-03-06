@@ -1,8 +1,8 @@
 import express from "express";
 import bodyParser from "body-parser";
 import OpenAI from "openai";
+import axios from "axios";
 import { createClient } from "@supabase/supabase-js";
-import twilio from "twilio";
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
@@ -15,20 +15,19 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// ===== TWILIO SETUP =====
-const twilioClient = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN
-);
+// Twilio credentials
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 
-const DRIVER_NUMBER = "whatsapp:+9660597046702"; // ← replace with driver number
+// Driver WhatsApp
+const DRIVER_NUMBER = "whatsapp:+966XXXXXXXXX"; // change to driver number
 
 // ===== STORED RESPONSES =====
 const storedResponses = {
-  price: "الأسعار:\n60 دقيقة – 250 ريال\n90 دقيقة – 350 ريال\n120 دقيقة – 450 ريال",
-  location: "نقدم خدمة مساج منزلي. أرسل موقعك لو سمحت.",
-  hours: "الحجوزات من 12 ظهرًا إلى 10:30 مساءً.",
-  types: "نقدم: استرخائي، رياضي، علاجي، لمفاوي، حجامة."
+  price: "Our prices are:\n60 min – 250 SAR\n90 min – 350 SAR\n120 min – 450 SAR",
+  location: "We provide home service massage. Please share your location.",
+  hours: "You can book between 12:00 PM and 10:30 PM. Last booking is 10:30 PM.",
+  types: "We offer Relaxation, Sports, Therapeutic, Lymphatic, and Hijama massage."
 };
 
 // ===== LANGUAGE DETECTION =====
@@ -37,17 +36,19 @@ function detectLanguage(text) {
   return arabicRegex.test(text) ? "ar" : "en";
 }
 
-// ===== CHECK STORED RESPONSES =====
+// ===== STORED RESPONSE CHECK =====
 function checkStoredResponse(message) {
   const msg = message.toLowerCase();
+
   if (msg.includes("price")) return storedResponses.price;
   if (msg.includes("where") || msg.includes("location")) return storedResponses.location;
   if (msg.includes("time") || msg.includes("hours")) return storedResponses.hours;
   if (msg.includes("types")) return storedResponses.types;
+
   return null;
 }
 
-// ===== REPEAT CUSTOMER =====
+// ===== REPEAT CUSTOMER DETECTION =====
 async function isRepeatCustomer(phone) {
   const { data } = await supabase
     .from("bookings")
@@ -60,6 +61,7 @@ async function isRepeatCustomer(phone) {
 
 // ===== THERAPIST DAILY LIMIT =====
 async function therapistAvailable(name) {
+
   const today = new Date().toISOString().split("T")[0];
 
   const { data } = await supabase
@@ -76,37 +78,159 @@ async function logBooking(data) {
   await supabase.from("bookings").insert([data]);
 }
 
-// ===== SEND DRIVER NOTIFICATION =====
-async function notifyDriver(details) {
-  const message = `
-🚗 *حجز جديد*
+// ===== SEND DRIVER MESSAGE =====
+async function notifyDriver(booking) {
+
+  const message =
+`🚗 NEW MASSAGE DELIVERY
 
 
-📍 المنطقة: ${details.area}
-🏠 العنوان: ${details.address}
+Time: ${booking.time}
+Duration: ${booking.duration}
 
-⏰ الوقت: ${details.time}
+Area: ${booking.area}
+Address: ${booking.address}
 
-⏳ المدة: ${details.duration} دقيقة
+Location:
+${booking.location_link}`;
 
-
-${details.mapLink ? `📍 الخريطة: ${details.mapLink}` : ""}
-`;
-
-  await twilioClient.messages.create({
-    from: process.env.TWILIO_WHATSAPP_NUMBER,
-    to: DRIVER_NUMBER,
-    body: message
-  });
+  await axios.post(
+    `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`,
+    new URLSearchParams({
+      From: "whatsapp:+14155238886",
+      To: DRIVER_NUMBER,
+      Body: message
+    }),
+    {
+      auth: {
+        username: TWILIO_ACCOUNT_SID,
+        password: TWILIO_AUTH_TOKEN
+      }
+    }
+  );
 }
 
-// ===== CONFIRM BOOKING =====
+// ===== TRANSCRIBE VOICE NOTE =====
+async function transcribeVoice(mediaUrl) {
+
+  const audio = await axios.get(mediaUrl, {
+    responseType: "arraybuffer",
+    auth: {
+      username: TWILIO_ACCOUNT_SID,
+      password: TWILIO_AUTH_TOKEN
+    }
+  });
+
+  const transcription = await openai.audio.transcriptions.create({
+    file: Buffer.from(audio.data),
+    model: "gpt-4o-mini-transcribe"
+  });
+
+  return transcription.text;
+}
+
+// ===== WEBHOOK =====
+app.post("/whatsapp/webhook", async (req, res) => {
+
+  let incomingMsg = req.body.Body || "";
+  const phone = req.body.From;
+
+  // ===== HANDLE VOICE NOTES =====
+  if (req.body.NumMedia > 0) {
+
+    const mediaType = req.body.MediaContentType0;
+
+    if (mediaType.startsWith("audio")) {
+
+      const mediaUrl = req.body.MediaUrl0;
+
+      incomingMsg = await transcribeVoice(mediaUrl);
+
+      console.log("Voice transcription:", incomingMsg);
+
+    }
+
+  }
+
+  const language = detectLanguage(incomingMsg);
+
+  // ===== STORED RESPONSES =====
+  const stored = checkStoredResponse(incomingMsg);
+
+  if (stored) {
+    return res.send(`<Response><Message>${stored}</Message></Response>`);
+  }
+
+  // ===== AI SYSTEM PROMPT =====
+  const systemPrompt = `
+
+You are the booking assistant for Revive Massage.
+
+Speak naturally in Saudi Arabic or English depending on customer language.
+
+Never repeat greetings.
+
+Focus ONLY on massage booking.
+
+Services:
+Relaxation
+Sports
+Therapeutic
+Lymphatic
+Hijama
+
+Prices:
+60 min 250 SAR
+90 min 350 SAR
+120 min 450 SAR
+Some areas +30 SAR delivery
+
+Rules:
+
+Ask about pain, injury, or surgery before recommending.
+
+If surgery → Therapeutic
+If stress → Relaxation
+If gym soreness → Sports
+
+Keep replies short and human.
+
+Always guide toward booking.
+
+Ask for:
+- location
+- preferred time
+- duration
+
+Maximum 6 bookings per therapist daily.
+
+`;
+
+  const completion = await openai.chat.completions.create({
+
+    model: "gpt-4o-mini",
+
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: incomingMsg }
+    ]
+
+  });
+
+  const aiReply = completion.choices[0].message.content;
+
+  res.send(`<Response><Message>${aiReply}</Message></Response>`);
+});
+
+// ===== CONFIRM BOOKING FUNCTION =====
 async function confirmBooking(details) {
+
   const repeat = await isRepeatCustomer(details.phone);
+
   const available = await therapistAvailable(details.therapist);
 
   if (!available) {
-    return "المعالج ممتلئ اليوم. اختر وقت آخر.";
+    return "Selected therapist is fully booked today.";
   }
 
   await logBooking({
@@ -123,61 +247,10 @@ async function confirmBooking(details) {
   await notifyDriver(details);
 
   return repeat
-    ? "تم تأكيد حجزك. نورتنا مرة ثانية 🙏"
-    : "تم تأكيد الحجز. نشوفك على خير 🙏";
+    ? "Your booking is confirmed. Welcome back."
+    : "Your booking is confirmed. See you soon.";
 }
 
-// ===== WEBHOOK =====
-app.post("/whatsapp/webhook", async (req, res) => {
-  const incomingMsg = req.body.Body;
-  const phone = req.body.From;
-
-  const latitude = req.body.Latitude;
-  const longitude = req.body.Longitude;
-
-  const language = detectLanguage(incomingMsg || "");
-
-  // STORED RESPONSES
-  const stored = checkStoredResponse(incomingMsg || "");
-  if (stored) {
-    res.type("text/xml");
-    return res.send(`<Response><Message>${stored}</Message></Response>`);
-  }
-
-  const systemPrompt = `
-You are a professional Saudi home massage booking assistant.
-
-Speak in natural Saudi Arabic.
-Sound warm, confident, and human.
-Do not repeat greetings.
-Keep replies short.
-
-Services:
-Relaxation, Sports, Therapeutic, Lymphatic, Hijama
-
-Prices:
-60m – 250 SAR
-90m – 350 SAR
-120m – 450 SAR
-
-Always guide toward booking.
-Ask for location and preferred time early.
-`;
-
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "assistant", content: "Continue the conversation naturally." },
-      { role: "user", content: incomingMsg }
-    ]
-  });
-
-  const aiReply = completion.choices[0].message.content;
-
-  res.type("text/xml");
-  res.send(`<Response><Message>${aiReply}</Message></Response>`);
-});
-
 const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => console.log("Server running"));
