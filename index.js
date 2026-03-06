@@ -1,11 +1,12 @@
 import express from "express";
 import bodyParser from "body-parser";
 import OpenAI from "openai";
-import twilio from "twilio";
 import { createClient } from "@supabase/supabase-js";
+import twilio from "twilio";
 import axios from "axios";
 
 const app = express();
+
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
@@ -16,20 +17,22 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-const twilioClient = twilio(
+const client = twilio(
   process.env.TWILIO_ACCOUNT_SID,
   process.env.TWILIO_AUTH_TOKEN
 );
 
-const DRIVER_NUMBER = "whatsapp:+966XXXXXXXXX"; // Replace with your driver’s WhatsApp
+const DRIVER_NUMBER = "whatsapp:+966XXXXXXXXX";
+
 
 // ===== STORED RESPONSES =====
 const storedResponses = {
-  price: "Our prices are:\n60 min – 250 SAR\n90 min – 350 SAR\n120 min – 450 SAR",
+  price: "Prices:\n60m – 250 SAR\n90m – 350 SAR\n120m – 450 SAR",
   location: "We provide home service massage. Please share your location.",
-  hours: "You can book between 12:00 PM and 10:30 PM. Last booking is 10:30 PM.",
-  types: "We offer Relaxation, Deep Tissue, Swedish, and Thai massage."
+  hours: "Bookings available from 12:00 PM until 10:30 PM.",
+  types: "Services: Relaxation, Sports, Therapeutic, Lymphatic, Hijama."
 };
+
 
 // ===== LANGUAGE DETECTION =====
 function detectLanguage(text) {
@@ -37,18 +40,23 @@ function detectLanguage(text) {
   return arabicRegex.test(text) ? "ar" : "en";
 }
 
-// ===== CHECK STORED RESPONSES =====
+
+// ===== STORED RESPONSE CHECK =====
 function checkStoredResponse(message) {
   const msg = message.toLowerCase();
+
   if (msg.includes("price")) return storedResponses.price;
   if (msg.includes("where") || msg.includes("location")) return storedResponses.location;
   if (msg.includes("time") || msg.includes("hours")) return storedResponses.hours;
   if (msg.includes("types") || msg.includes("massage")) return storedResponses.types;
+
   return null;
 }
 
-// ===== REPEAT CUSTOMER DETECTION =====
+
+// ===== REPEAT CUSTOMER CHECK =====
 async function isRepeatCustomer(phone) {
+
   const { data } = await supabase
     .from("bookings")
     .select("id")
@@ -58,195 +66,205 @@ async function isRepeatCustomer(phone) {
   return data && data.length > 0;
 }
 
+
 // ===== THERAPIST DAILY LIMIT =====
 async function therapistAvailable(name) {
+
   const today = new Date().toISOString().split("T")[0];
+
   const { data } = await supabase
     .from("bookings")
     .select("id")
     .eq("therapist", name)
     .gte("created_at", today);
 
-  return data.length < 6; // max 6 bookings per therapist per day
+  return data.length < 6;
 }
 
-// ===== LOG BOOKING =====
-async function logBooking(data) {
-  await supabase.from("bookings").insert([data]);
-}
 
-// ===== VOICE NOTE TRANSCRIPTION =====
-async function transcribeVoice(mediaUrl){
-  const response = await axios.get(mediaUrl, { responseType:'arraybuffer' });
-  const audio = Buffer.from(response.data);
-  const transcription = await openai.audio.transcriptions.create({
-    file: audio,
-    model: "gpt-4o-transcribe"
-  });
-  return transcription.text;
-}
+// ===== LOCATION PARSER =====
+function parseLocation(req) {
 
-// ===== PARSE LOCATION =====
-function parseLocation(req){
-  if(req.body.Latitude){
+  if (req.body.Latitude && req.body.Longitude) {
     return {
       lat: req.body.Latitude,
       lng: req.body.Longitude,
-      address: req.body.Address
+      address: req.body.Address || "Shared WhatsApp location"
     };
   }
+
   return null;
 }
 
-// ===== AI INTENT DETECTION =====
-async function understandIntent(message){
-  const prompt = `
-You are a Saudi WhatsApp massage booking receptionist for Revive Massage.
 
-Extract JSON with:
-service, duration, time, intent
+// ===== LOG BOOKING =====
+async function logBooking(data) {
 
-Intent can be: book, cancel, reschedule, question
+  await supabase.from("bookings").insert([data]);
 
-Message: ${message}
-Return JSON only.
-`;
-
-  const response = await openai.chat.completions.create({
-    model:"gpt-4o-mini",
-    messages:[{role:"user",content:prompt}]
-  });
-
-  return JSON.parse(response.choices[0].message.content);
 }
 
-// ===== DRIVER NOTIFICATION =====
-async function notifyDriver(service, time, address){
-  await twilioClient.messages.create({
+
+// ===== SEND DRIVER MESSAGE =====
+async function notifyDriver(booking) {
+
+  const message = `🚗 New Massage Delivery
+
+📍 Location:
+${booking.address}
+
+⏰ Time:
+${booking.appointment_time}
+
+⏱ Duration:
+${booking.duration} minutes
+
+💆 Therapist:
+${booking.therapist}`;
+
+  await client.messages.create({
     from: process.env.TWILIO_WHATSAPP_NUMBER,
     to: DRIVER_NUMBER,
-    body: `
-🚗 New Pickup
-
-Service: ${service}
-Time: ${time}
-
-Location:
-${address}
-`
-  });
-}
-
-// ===== CONFIRM BOOKING =====
-async function confirmBooking(details){
-  const repeat = await isRepeatCustomer(details.phone);
-  const available = await therapistAvailable(details.therapist);
-
-  if(!available){
-    return "Selected therapist is fully booked today. Please choose another time.";
-  }
-
-  await logBooking({
-    customer_name: details.name,
-    phone: details.phone,
-    area: details.area,
-    address: details.address,
-    duration: details.duration,
-    therapist: details.therapist,
-    price: details.price,
-    status: "confirmed"
+    body: message
   });
 
-  return repeat
-    ? "Your booking is confirmed. Welcome back."
-    : "Your booking is confirmed. We look forward to serving you.";
 }
 
-// ===== CANCEL BOOKING =====
-async function cancelBooking(phone){
-  await supabase.from("bookings")
-    .update({ status: "cancelled" })
-    .eq("phone", phone)
-    .eq("status","confirmed");
+
+// ===== VOICE NOTE TRANSCRIPTION =====
+async function transcribeVoice(mediaUrl) {
+
+  const response = await axios.get(mediaUrl, {
+    responseType: "arraybuffer",
+    auth: {
+      username: process.env.TWILIO_ACCOUNT_SID,
+      password: process.env.TWILIO_AUTH_TOKEN
+    }
+  });
+
+  const transcription = await openai.audio.transcriptions.create({
+    file: Buffer.from(response.data),
+    model: "whisper-1"
+  });
+
+  return transcription.text;
 }
+
 
 // ===== WEBHOOK =====
-app.post("/whatsapp/webhook", async(req,res)=>{
-  let message = req.body.Body || "";
+app.post("/whatsapp/webhook", async (req, res) => {
+
+  let incomingMsg = req.body.Body || "";
   const phone = req.body.From;
 
-  const language = detectLanguage(message);
+  // ===== HANDLE VOICE NOTES =====
+  if (req.body.NumMedia > 0 && req.body.MediaContentType0.includes("audio")) {
 
-  const stored = checkStoredResponse(message);
-  if(stored){
-    await twilioClient.messages.create({
-      from: process.env.TWILIO_WHATSAPP_NUMBER,
-      to: phone,
-      body: stored
-    });
-    return res.sendStatus(200);
-  }
-
-  if(req.body.NumMedia > 0){
     const mediaUrl = req.body.MediaUrl0;
-    message = await transcribeVoice(mediaUrl);
+
+    incomingMsg = await transcribeVoice(mediaUrl);
+
   }
 
   const location = parseLocation(req);
-  const intent = await understandIntent(message);
 
-  if(intent.intent === "cancel"){
-    await cancelBooking(phone);
-    await twilioClient.messages.create({
-      from: process.env.TWILIO_WHATSAPP_NUMBER,
-      to: phone,
-      body: "Your appointment has been cancelled."
-    });
-    return res.sendStatus(200);
+  const language = detectLanguage(incomingMsg);
+
+
+  // ===== STORED RESPONSES =====
+  const stored = checkStoredResponse(incomingMsg);
+
+  if (stored) {
+    return res.send(`<Response><Message>${stored}</Message></Response>`);
   }
 
-  if(location){
-    await logBooking({
-      customer_name: intent.customer_name || "",
-      phone,
-      service: intent.service,
-      duration: intent.duration,
-      time: intent.time,
-      address: location.address,
-      lat: location.lat,
-      lng: location.lng,
-      status: "confirmed"
-    });
 
-    await notifyDriver(intent.service,intent.time,location.address);
+  // ===== AI PROMPT =====
+  const systemPrompt = `
 
-    await twilioClient.messages.create({
-      from: process.env.TWILIO_WHATSAPP_NUMBER,
-      to: phone,
-      body: `
-✅ Your session is confirmed
+You are a Saudi professional WhatsApp massage booking assistant for a company called Revive Massage.
 
-Service: ${intent.service}
-Time: ${intent.time}
+Speak in natural Saudi Arabic.
+Sound warm, confident, and human.
 
-Our therapist is on the way.
+Never repeat greetings.
 
-Thank you for choosing Revive Massage Therapy.
-`
-    });
+Focus ONLY on massage services and booking.
 
-    return res.sendStatus(200);
-  }
+Services:
+Relaxation
+Sports
+Therapeutic
+Lymphatic
+Hijama
 
-  // Ask for location if not received yet
-  await twilioClient.messages.create({
-    from: process.env.TWILIO_WHATSAPP_NUMBER,
-    to: phone,
-    body: "Please send your location to confirm the booking."
+Prices:
+60m – 250 SAR
+90m – 350 SAR
+120m – 450 SAR
+
+Booking process order:
+1 Ask massage type
+2 Ask duration
+3 Ask preferred time
+4 Ask therapist preference
+5 Ask customer to share location
+
+Only confirm booking AFTER location is received.
+
+Ask about pain/injury before recommending service.
+
+Keep replies short.
+
+Goal: guide customer step-by-step to complete the booking.
+
+`;
+
+  const completion = await openai.chat.completions.create({
+
+    model: "gpt-4o-mini",
+
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: incomingMsg }
+    ]
+
   });
 
-  res.sendStatus(200);
+  const aiReply = completion.choices[0].message.content;
+
+
+  // ===== LOCATION TRIGGERS BOOKING =====
+  if (location) {
+
+    const booking = {
+
+      customer_name: "",
+      phone: phone,
+      area: "",
+      address: location.address,
+      duration: 60,
+      therapist: "Therapist Assigned",
+      price: 250,
+      status: "confirmed",
+      lat: location.lat,
+      lng: location.lng,
+      appointment_time: "Pending",
+      
+    };
+
+    await logBooking(booking);
+
+    await notifyDriver(booking);
+
+  }
+
+  res.send(`<Response><Message>${aiReply}</Message></Response>`);
+
 });
 
+
+// ===== SERVER =====
 const PORT = process.env.PORT || 3000;
-app.listen(PORT,()=>console.log("Server running"));
+
+app.listen(PORT, () => console.log("Server running"));
